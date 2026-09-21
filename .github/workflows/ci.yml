@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    name: Build and lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t iodine-docker:ci .
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: Lint shell scripts (shellcheck)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck iodined.sh tests/test_entrypoint.sh
+
+  test:
+    name: Entrypoint tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run entrypoint tests
+        run: bash tests/test_entrypoint.sh

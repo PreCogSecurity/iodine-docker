@@ -1,0 +1,9 @@
+# hadolint configuration
+#
+# DL3008 (pin apt package versions) is disabled because the base image
+# (phusion/baseimage:0.9.16) is a frozen 2015 snapshot of Ubuntu 14.04; the
+# exact versions of net-tools and iodine available in that repository cannot
+# be verified without a build, and pinning guessed versions would break the
+# image. The base image itself is pinned by digest in the Dockerfile.
+ignored:
+  - DL3008
