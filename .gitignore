@@ -1,0 +1,7 @@
+# Local environment files (see .env.example)
+.env
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*~
