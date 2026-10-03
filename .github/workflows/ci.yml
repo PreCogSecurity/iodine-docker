@@ -4,11 +4,66 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      block_on_vulns:
+        description: >-
+          Fail the security-scan job on fixable HIGH/CRITICAL findings
+          ("1") instead of reporting only ("0").
+        required: false
+        default: '0'
+        type: string
+
+# Least privilege: nothing in this workflow needs to write to the repository.
+# The security-scan job widens its own scope for code scanning uploads.
+permissions:
+  contents: read
+
+# Don't burn runner minutes on commits that have already been superseded.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Unset for push/pull_request events, so `inputs.block_on_vulns || '0'` always
+  # resolves to a value.
+  BLOCK_ON_VULNS: ${{ inputs.block_on_vulns || '0' }}
 
 jobs:
-  build:
-    name: Build and lint
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint shell scripts (shellcheck)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck iodined.sh healthcheck.sh tests/test_entrypoint.sh
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  test:
+    name: Entrypoint tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run entrypoint and healthcheck tests
+        run: bash tests/test_entrypoint.sh
+
+  build:
+    name: Build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,23 +71,90 @@ jobs:
       - name: Build Docker image
         run: docker build -t iodine-docker:ci .
 
-      - name: Lint Dockerfile (hadolint)
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
-
-      - name: Lint shell scripts (shellcheck)
+      # The base image is a frozen Ubuntu 14.04 archive, so the apt versions
+      # cannot be pinned in the Dockerfile without guessing (and a wrong guess
+      # breaks the build). Record what actually got installed instead: this is
+      # the auditable inventory, and it is the prerequisite for pinning those
+      # versions safely once the base image is modernised.
+      - name: Record installed package inventory
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-          shellcheck iodined.sh tests/test_entrypoint.sh
+          docker run --rm --entrypoint /bin/dpkg-query iodine-docker:ci \
+            -f '${binary:Package} ${Version}\n' -W iodine net-tools
 
-  test:
-    name: Entrypoint tests
+      # Exercises the image for real: boots it, waits for the image's own
+      # HEALTHCHECK to pass, and tears it down. Reuses the image built above so
+      # it is built and tested exactly once.
+      - name: Container smoke test
+        run: bash tests/test_entrypoint.sh
+        env:
+          RUN_DOCKER_TESTS: '1'
+          IODINE_TEST_IMAGE: 'iodine-docker:ci'
+
+      - name: Export image for the security scan
+        run: docker save iodine-docker:ci | gzip > image.tar.gz
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: iodine-image
+          path: image.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  security-scan:
+    name: Security scan
+    needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run entrypoint tests
-        run: bash tests/test_entrypoint.sh
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: iodine-image
+
+      - name: Load image
+        run: gunzip -c image.tar.gz | docker load
+
+      # Results are always uploaded to the Security tab, so findings are
+      # visible and triaged whether or not they block the run.
+      #
+      # Blocking is opt-in (workflow_dispatch input `block_on_vulns`) on
+      # purpose: the image is pinned to phusion/baseimage 0.9.16, a frozen
+      # Ubuntu 14.04 snapshot, so it carries a large backlog of
+      # no-longer-receiving-updates CVEs. A permanently red pipeline teaches
+      # everyone to ignore CI. Turn the gate on once the base image is
+      # modernised; `ignore-unfixed` keeps the gate focused on what an
+      # operator can actually act on today.
+      - name: Scan image for known vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: iodine-docker:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: ${{ env.BLOCK_ON_VULNS }}
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+      # Full severity table in the job log, including unfixed findings, so the
+      # total exposure is recorded even when the gate is off.
+      - name: Full vulnerability report (informational)
+        if: always()
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: iodine-docker:ci
+          format: table
+          severity: LOW,MEDIUM,HIGH,CRITICAL
