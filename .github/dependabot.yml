@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # Keeps the phusion/baseimage digest pin in the Dockerfile current. The base
+  # image is a frozen Ubuntu 14.04 snapshot, so this is the only dependency in
+  # the image that Dependabot can update automatically - apt has no Dependabot
+  # ecosystem, and the archive the base image points at is no longer maintained.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security
+    commit-message:
+      prefix: "build(deps)"
+
+  # Keeps the CI actions (checkout, hadolint, trivy, upload-artifact,
+  # codeql-action) on current releases; these are the tools that stand between
+  # a pushed commit and a scanned image.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci(deps)"
